@@ -44,6 +44,18 @@ pip install pillow
 python widget.py
 ```
 
+### Running on macOS
+
+Requires Python 3 with Tk 8.6+ and Pillow. See [README.mac.md](README.mac.md) for details.
+
+```bash
+brew install python-tk
+python3 -m pip install pillow
+python3 widget.py
+```
+
+You can also run `./build_mac.sh` to package a standalone `TokenHamster.app`.
+
 ## Using it
 
 - Drag the widget to move it. The position is remembered.

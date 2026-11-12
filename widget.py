@@ -7,8 +7,12 @@ from ctypes import wintypes
 VERSION = "1.1.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # 실행 파일(exe)로 묶였을 때는 사용 기록 캐시와 설정을 %LOCALAPPDATA%\TokenHamster 에 둔다.
+IS_MAC = platform.system() == "Darwin"
 FROZEN = getattr(sys, "frozen", False)
-DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "TokenHamster") if FROZEN else APP_DIR
+if IS_MAC:
+    DATA_DIR = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "TokenHamster")
+else:
+    DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "TokenHamster") if FROZEN else APP_DIR
 os.makedirs(DATA_DIR, exist_ok=True)
 CACHE_PATH = os.path.join(DATA_DIR, "cache.json")
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
@@ -29,7 +33,7 @@ TEXT = {
         "mood_hungry": "배고파요…", "mood_eat": "냠냠 먹는 중", "mood_base": "기분 좋아요", "mood_full": "배불러요!",
         "loading": "읽는 중…", "nolog": "기록을 못 찾았어요", "error": "! 오류",
         "h5": "최근 5시간", "h7": "최근 7일",
-        "m_refresh": "지금 새로고침", "m_rename": "이름 바꾸기", "m_reset": "위치 초기화",
+        "m_toggle_hide": "위젯 숨기기", "m_toggle_show": "위젯 보이기", "m_tray_quit": "TokenHamster 종료", "m_refresh": "지금 새로고침", "m_rename": "이름 바꾸기", "m_reset": "위치 초기화",
         "m_lang": "English", "m_diag": "진단 정보 저장", "m_quit": "종료",
         "rename_title": "이름 바꾸기", "rename_prompt": "햄스터 이름을 적어 주세요 ({n}자까지)",
         "tip_nolog": ("기록을 못 찾았어요.\n\n"
@@ -55,7 +59,7 @@ TEXT = {
         "mood_hungry": "Hungry…", "mood_eat": "Munching", "mood_base": "Happy", "mood_full": "Full!",
         "loading": "Loading…", "nolog": "No logs found", "error": "! Error",
         "h5": "Last 5h", "h7": "Last 7d",
-        "m_refresh": "Refresh now", "m_rename": "Rename", "m_reset": "Reset position",
+        "m_toggle_hide": "Hide widget", "m_toggle_show": "Show widget", "m_tray_quit": "Quit TokenHamster", "m_refresh": "Refresh now", "m_rename": "Rename", "m_reset": "Reset position",
         "m_lang": "한국어", "m_diag": "Save diagnostics", "m_quit": "Quit",
         "rename_title": "Rename", "rename_prompt": "Name your hamster (up to {n} characters)",
         "tip_nolog": ("No logs found.\n\n"
@@ -87,7 +91,14 @@ def tr(key, **kw):
 
 
 def detect_lang():
-    """Windows 표시 언어가 한국어면 ko, 아니면 en."""
+    """Windows/macOS 표시 언어가 한국어면 ko, 아니면 en."""
+    if IS_MAC:
+        try:
+            import locale
+            loc = locale.getdefaultlocale()[0] or ""
+            return "ko" if loc.startswith("ko") else "en"
+        except Exception:
+            return "en"
     try:
         return "ko" if (ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF) == 0x12 else "en"
     except Exception:
@@ -525,6 +536,9 @@ def diagnose_text():
 
 def desktop_dir():
     """진짜 바탕화면 폴더(OneDrive로 옮겨졌어도). 실패하면 ~/Desktop."""
+    if IS_MAC:
+        d = os.path.join(os.path.expanduser("~"), "Desktop")
+        return d if os.path.isdir(d) else os.path.expanduser("~")
     try:
         class GUID(ctypes.Structure):
             _fields_ = [("a", ctypes.c_uint32), ("b", ctypes.c_uint16), ("c", ctypes.c_uint16), ("d", ctypes.c_ubyte * 8)]
@@ -548,12 +562,203 @@ def save_diagnose(open_it=True):
     with open(out, "w", encoding="utf-8-sig", newline="\r\n") as f:
         f.write(diagnose_text())
     if open_it:
-        os.startfile(out)
+        if IS_MAC:
+            import subprocess
+            subprocess.run(["open", out])
+        else:
+            os.startfile(out)
     return out
+
+
+# ---------------------------------------------------------------- Mac 전용 보조
+if IS_MAC:
+    _OBJC = {}
+
+    def _objc():
+        if "lib" not in _OBJC:
+            import ctypes.util
+            lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+            ctypes.cdll.LoadLibrary("/System/Library/Frameworks/AppKit.framework/AppKit")
+            lib.objc_getClass.restype = ctypes.c_void_p
+            lib.objc_getClass.argtypes = [ctypes.c_char_p]
+            lib.sel_registerName.restype = ctypes.c_void_p
+            lib.sel_registerName.argtypes = [ctypes.c_char_p]
+            _OBJC["lib"] = lib
+        return _OBJC["lib"]
+
+    class _CGRect(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double), ("w", ctypes.c_double), ("h", ctypes.c_double)]
+
+    def _send(obj, sel, restype=ctypes.c_void_p, argtypes=(), *args):
+        lib = _objc()
+        name = "objc_msgSend"
+        if restype is _CGRect and os.uname().machine == "x86_64":
+            name = "objc_msgSend_stret"
+        fn = ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes)((name, lib))
+        return fn(obj, lib.sel_registerName(sel.encode()), *args)
+
+    def mac_screens():
+        """화면마다 (전체, 메뉴 막대·Dock 뺀 영역)을 Tk 좌표(왼쪽 위 원점)로 돌려준다. 첫 번째가 주 화면."""
+        lib = _objc()
+        arr = _send(lib.objc_getClass(b"NSScreen"), "screens")
+        n = _send(arr, "count", ctypes.c_ulong)
+        out, main_h = [], None
+        for i in range(n):
+            sc = _send(arr, "objectAtIndex:", ctypes.c_void_p, (ctypes.c_ulong,), i)
+            fr = _send(sc, "frame", _CGRect)
+            vf = _send(sc, "visibleFrame", _CGRect)
+            if main_h is None:
+                main_h = fr.h
+            def conv(r):
+                top = main_h - (r.y + r.h)
+                return int(r.x), int(top), int(r.x + r.w), int(top + r.h)
+            out.append((conv(fr), conv(vf)))
+        return out
+
+    def mac_hide_dock_icon():
+        """Dock 아이콘과 앱 메뉴 없이 떠 있게 한다 (NSApplicationActivationPolicyAccessory)."""
+        try:
+            lib = _objc()
+            app = _send(lib.objc_getClass(b"NSApplication"), "sharedApplication")
+            _send(app, "setActivationPolicy:", ctypes.c_bool, (ctypes.c_long,), 1)
+        except Exception:
+            pass
+
+    class _NSSize(ctypes.Structure):
+        _fields_ = [("w", ctypes.c_double), ("h", ctypes.c_double)]
+
+    def _nsstring(s):
+        return _send(_objc().objc_getClass(b"NSString"), "stringWithUTF8String:", ctypes.c_void_p, (ctypes.c_char_p,), s.encode("utf-8"))
+
+    def _nsimage(png_bytes, w, h):
+        lib = _objc()
+        data = _send(lib.objc_getClass(b"NSData"), "dataWithBytes:length:", ctypes.c_void_p, (ctypes.c_char_p, ctypes.c_ulong), png_bytes, len(png_bytes))
+        img = _send(_send(lib.objc_getClass(b"NSImage"), "alloc"), "initWithData:", ctypes.c_void_p, (ctypes.c_void_p,), data)
+        _send(img, "setSize:", None, (_NSSize,), _NSSize(w, h))
+        return img
+
+    _TRAY_ACTIONS = {}
+    _TRAY_CALLBACK_REF = None
+
+    def _get_tray_delegate_class():
+        global _TRAY_CALLBACK_REF
+        lib = _objc()
+        cls_name = b"TokenHamsterTrayDelegate"
+        cls = lib.objc_getClass(cls_name)
+        if cls:
+            return cls
+        lib.objc_allocateClassPair.restype = ctypes.c_void_p
+        lib.objc_allocateClassPair.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+        lib.class_addMethod.restype = ctypes.c_bool
+        lib.class_addMethod.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
+        lib.objc_registerClassPair.argtypes = [ctypes.c_void_p]
+
+        CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+        def on_action(_self, _cmd, sender):
+            tag = _send(sender, "tag", ctypes.c_long)
+            act = _TRAY_ACTIONS.get(tag)
+            if act:
+                act()
+        _TRAY_CALLBACK_REF = CALLBACK(on_action)
+        cls = lib.objc_allocateClassPair(lib.objc_getClass(b"NSObject"), cls_name, 0)
+        lib.class_addMethod(cls, lib.sel_registerName(b"menuAction:"), ctypes.cast(_TRAY_CALLBACK_REF, ctypes.c_void_p), b"v@:@")
+        lib.objc_registerClassPair(cls)
+        return cls
+
+    class MacNativeTray:
+        def __init__(self, root, callbacks, pet_name, make_image_fn, labels):
+            self.root = root
+            self.make_image_fn = make_image_fn
+            self.imgs = {}
+            lib = _objc()
+
+            DelegateClass = _get_tray_delegate_class()
+            self.delegate = _send(_send(DelegateClass, "alloc"), "init")
+
+            self.menu = _send(_send(lib.objc_getClass(b"NSMenu"), "alloc"), "init")
+            _send(self.menu, "setAutoenablesItems:", None, (ctypes.c_bool,), False)
+
+            _TRAY_ACTIONS.clear()
+            for tag, act in callbacks.items():
+                _TRAY_ACTIONS[tag] = act
+
+            items = [
+                (0, labels.get(0, "위젯 숨기기")),
+                (1, labels.get(1, "지금 새로고침")),
+                (2, labels.get(2, "위치 초기화")),
+                (3, labels.get(3, "English")),
+                (None, "---"),
+                (4, labels.get(4, "TokenHamster 종료")),
+            ]
+
+            self.menu_items = {}
+            for tag, label in items:
+                if tag is None:
+                    sep = _send(lib.objc_getClass(b"NSMenuItem"), "separatorItem")
+                    _send(self.menu, "addItem:", None, (ctypes.c_void_p,), sep)
+                else:
+                    mi = _send(self.menu, "addItemWithTitle:action:keyEquivalent:", ctypes.c_void_p,
+                               (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p),
+                               _nsstring(label), lib.sel_registerName(b"menuAction:"), _nsstring(""))
+                    _send(mi, "setTarget:", None, (ctypes.c_void_p,), self.delegate)
+                    _send(mi, "setTag:", None, (ctypes.c_long,), tag)
+                    _send(mi, "setEnabled:", None, (ctypes.c_bool,), True)
+                    self.menu_items[tag] = mi
+
+            bar = _send(lib.objc_getClass(b"NSStatusBar"), "systemStatusBar")
+            self.item = _send(bar, "statusItemWithLength:", ctypes.c_void_p, (ctypes.c_double,), -1.0)
+            _send(self.item, "retain")
+            self.button = _send(self.item, "button")
+            _send(self.menu, "retain")
+
+            nsimg = self._get_nsimage("base")
+            _send(self.button, "setImage:", None, (ctypes.c_void_p,), nsimg)
+            _send(self.button, "setToolTip:", None, (ctypes.c_void_p,), _nsstring(pet_name))
+            _send(self.item, "setMenu:", None, (ctypes.c_void_p,), self.menu)
+            self.key = "base"
+
+        def _get_nsimage(self, key):
+            if key not in self.imgs:
+                png_bytes, w, h = self.make_image_fn(key)
+                self.imgs[key] = _nsimage(png_bytes, w, h)
+            return self.imgs[key]
+
+        def update(self, key, tip):
+            if not self.button:
+                return
+            if key != self.key:
+                self.key = key
+                _send(self.button, "setImage:", None, (ctypes.c_void_p,), self._get_nsimage(key))
+            _send(self.button, "setToolTip:", None, (ctypes.c_void_p,), _nsstring(tip))
+
+        def update_labels(self, labels):
+            for tag, label in labels.items():
+                mi = self.menu_items.get(tag)
+                if mi:
+                    _send(mi, "setTitle:", None, (ctypes.c_void_p,), _nsstring(label))
+
+        def destroy(self):
+            try:
+                if self.item:
+                    bar = _send(_objc().objc_getClass(b"NSStatusBar"), "systemStatusBar")
+                    _send(bar, "removeStatusItem:", None, (ctypes.c_void_p,), self.item)
+                    _send(self.item, "release")
+                if self.menu:
+                    _send(self.menu, "release")
+            except Exception:
+                pass
+            self.item = None
+            self.button = None
+            self.menu = None
 
 
 # ---------------------------------------------------------------- GUI
 def work_area():
+    if IS_MAC:
+        try:
+            return mac_screens()[0][1]
+        except Exception:
+            return 0, 25, 1440, 900
     r = wintypes.RECT()
     ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(r), 0)
     return r.left, r.top, r.right, r.bottom
@@ -562,26 +767,37 @@ def work_area():
 def run_gui(args):
     import tkinter as tk
     import tkinter.font as tkfont
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:
-        pass
-    # 단일 실행
-    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    name = "Local\\ClaudeUsageWidget" + ("_shot" if (args.screenshot or args.selftest) else "")
-    mutex = k32.CreateMutexW(None, False, name)
-    if ctypes.get_last_error() == 183:
-        return
-    try:
-        S = ctypes.windll.user32.GetDpiForSystem() / 96.0
-    except Exception:
+    shot_mode = bool(args.screenshot or args.selftest)
+    if IS_MAC:
+        import fcntl
+        lock = open(os.path.join(DATA_DIR, "widget%s.lock" % ("_shot" if shot_mode else "")), "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return
         S = 1.0
+    else:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        name = "Local\\ClaudeUsageWidget" + ("_shot" if shot_mode else "")
+        mutex = k32.CreateMutexW(None, False, name)
+        if ctypes.get_last_error() == 183:
+            return
+        try:
+            S = ctypes.windll.user32.GetDpiForSystem() / 96.0
+        except Exception:
+            S = 1.0
     if args.screenshot and args.scale:          # 게시물용으로 크게 찍을 때만
         S = args.scale
     W, H = int(310 * S), int(112 * S)
 
     root = tk.Tk()
     root.withdraw()
+    if IS_MAC:
+        mac_hide_dock_icon()
     root.overrideredirect(True)
     root.attributes("-topmost", True)
     root.configure(bg=INK)
@@ -591,7 +807,11 @@ def run_gui(args):
     all_fonts = []
 
     def fam():
-        return "Pretendard" if "Pretendard" in fams else "Malgun Gothic" if LANG == "ko" else "Segoe UI"
+        if "Pretendard" in fams:
+            return "Pretendard"
+        if IS_MAC:
+            return "Apple SD Gothic Neo" if LANG == "ko" else "Helvetica Neue"
+        return "Malgun Gothic" if LANG == "ko" else "Segoe UI"
 
     def F(px, bold=False):
         f = tkfont.Font(family=fam(), size=-int(px * S), weight="bold" if bold else "normal")
@@ -642,6 +862,11 @@ def run_gui(args):
         return r - W - int(12 * S), b - H - int(12 * S)
 
     def valid(x, y):
+        if IS_MAC:
+            for fr, _vf in mac_screens():
+                if fr[0] - W + 40 <= x <= fr[2] - 40 and fr[1] <= y <= fr[3] - 40:
+                    return True
+            return False
         vx = ctypes.windll.user32.GetSystemMetrics(76)
         vy = ctypes.windll.user32.GetSystemMetrics(77)
         vw = ctypes.windll.user32.GetSystemMetrics(78)
@@ -846,6 +1071,7 @@ def run_gui(args):
         settings["name"] = new
         save_settings()
         draw()
+        tray_update()
 
     def diag_save():
         hide_tip()
@@ -857,12 +1083,37 @@ def run_gui(args):
                 pass
         threading.Thread(target=job, daemon=True).start()
 
+    tray = {"on": False, "key": None, "imgs": {}, "menu": None, "mac_tray": None}
+
     def quit_():
         hide_tip()
+        if tray["on"]:
+            tray["on"] = False
+            if tray.get("mac_tray"):
+                tray["mac_tray"].destroy()
+            try:
+                root.tk.call("tk", "systray", "destroy")
+            except tk.TclError:
+                pass
         root.destroy()
+
+    def widget_shown():
+        return root.state() != "withdrawn"
+
+    def toggle_widget():
+        """위젯 창만 숨기거나 다시 띄운다. 집계와 메뉴 막대 아이콘은 계속 돈다."""
+        hide_tip()
+        if widget_shown():
+            root.withdraw()
+        else:
+            root.deiconify()
+            root.attributes("-topmost", True)
+        menu_labels()
 
     menu = tk.Menu(root, tearoff=0, bg=INK, fg=CREAM, activebackground=ORANGE, activeforeground=CREAM,
                    font=F(11), bd=0)
+    if IS_MAC:
+        menu.add_command(command=toggle_widget)
     menu.add_command(command=refresh_evt.set)
     menu.add_command(command=rename)
     menu.add_command(command=reset_pos)
@@ -871,9 +1122,23 @@ def run_gui(args):
     menu.add_separator()
     menu.add_command(command=quit_)
 
+    def get_tray_labels():
+        tgl = tr("m_toggle_hide") if widget_shown() else tr("m_toggle_show")
+        return {0: tgl, 1: tr("m_refresh"), 2: tr("m_reset"), 3: tr("m_lang"), 4: tr("m_tray_quit")}
+
     def menu_labels():
-        for i, k in zip((0, 1, 2, 3, 4, 6), ("m_refresh", "m_rename", "m_reset", "m_lang", "m_diag", "m_quit")):
+        if IS_MAC:
+            tgl = tr("m_toggle_hide") if widget_shown() else tr("m_toggle_show")
+            menu.entryconfigure(0, label=tgl)
+            indices = (1, 2, 3, 4, 5, 7)
+        else:
+            indices = (0, 1, 2, 3, 4, 6)
+        for i, k in zip(indices, ("m_refresh", "m_rename", "m_reset", "m_lang", "m_diag", "m_quit")):
             menu.entryconfigure(i, label=tr(k))
+        if tray.get("mac_tray"):
+            tray["mac_tray"].update_labels(get_tray_labels())
+        if tray.get("menu"):
+            tray["menu"].entryconfigure(0, label=tr("m_toggle_hide") if widget_shown() else tr("m_toggle_show"))
     menu_labels()
 
     def switch_lang(to=None):
@@ -887,7 +1152,86 @@ def run_gui(args):
             f.configure(family=fam())
         menu_labels()
         draw()
-    cv.bind("<Button-3>", lambda e: (hide_tip(), menu.tk_popup(e.x_root, e.y_root)))
+        tray_update()
+
+    def popup(e):
+        hide_tip()
+        menu.tk_popup(e.x_root, e.y_root)
+        return "break"
+    if IS_MAC:
+        cv.bind("<Button-2>", popup)
+        cv.bind("<Control-Button-1>", popup)
+    else:
+        cv.bind("<Button-3>", popup)
+
+    def tray_image(key):
+        if key not in tray["imgs"]:
+            grid = {"hungry": mp.hungry, "full": mp.full}.get(key, mp.base)()
+            im = mp.to_image(grid, 1)
+            im = im.crop(im.getbbox())
+            h = 18
+            im = im.resize((max(1, round(im.width * h / im.height)), h), Image.LANCZOS)
+            tray["imgs"][key] = ImageTk.PhotoImage(im)
+        return tray["imgs"][key]
+
+    def tray_image_bytes(key):
+        import io
+        grid = {"hungry": mp.hungry, "full": mp.full}.get(key, mp.base)()
+        im = mp.to_image(grid, 1)
+        im = im.crop(im.getbbox())
+        h = 18
+        im = im.resize((max(1, round(im.width * h / im.height)), h), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue(), im.width, im.height
+
+    def tray_update():
+        if not tray["on"]:
+            return
+        m = mood()
+        key = "base" if m == "eat" else m
+        d = state["data"]
+        tip = "%s · %s %s" % (name_now(), tr("h5"), fmt(d["tokens_5h"])) if d else name_now()
+        if tray.get("mac_tray"):
+            tray["mac_tray"].update(key, tip)
+            return
+        if key != tray["key"]:
+            tray["key"] = key
+            root.tk.call("tk", "systray", "configure", "-image", tray_image(key))
+        root.tk.call("tk", "systray", "configure", "-text", tip)
+
+    def tray_click(*_a):
+        hide_tip()
+        x, y = root.winfo_pointerxy()
+        tray["menu"].tk_popup(x, y)
+
+    if IS_MAC and not args.screenshot:
+        tm = tk.Menu(root, tearoff=0)
+        tm.add_command(label=tr("m_toggle_hide"), command=toggle_widget)
+        tm.add_command(label=tr("m_refresh"), command=refresh_evt.set)
+        tm.add_command(label=tr("m_reset"), command=lambda: (reset_pos(), widget_shown() or toggle_widget()))
+        tm.add_command(label=tr("m_lang"), command=lambda: switch_lang())
+        tm.add_separator()
+        tm.add_command(label=tr("m_tray_quit"), command=quit_)
+        tray["menu"] = tm
+
+        try:
+            tray["mac_tray"] = MacNativeTray(root, {
+                0: lambda: root.after_idle(toggle_widget),
+                1: lambda: root.after_idle(refresh_evt.set),
+                2: lambda: root.after_idle(lambda: (reset_pos(), widget_shown() or toggle_widget())),
+                3: lambda: root.after_idle(lambda: switch_lang()),
+                4: lambda: root.after_idle(quit_),
+            }, name_now(), tray_image_bytes, get_tray_labels())
+            tray["on"], tray["key"] = True, "base"
+        except Exception:
+            try:
+                cb = root.register(tray_click)
+                root.tk.call("tk", "systray", "create", "-image", tray_image("base"), "-text", name_now(),
+                             "-button1", cb, "-button3", cb)
+                tray["on"], tray["key"] = True, "base"
+            except tk.TclError:
+                pass
 
     stop = {"v": False}
 
@@ -942,6 +1286,11 @@ def run_gui(args):
         def shot():
             # 화면을 캡처하면 뒤나 위에 있는 다른 창(카톡 등)이 찍힐 수 있어서,
             # PrintWindow로 위젯 창 자기 자신의 픽셀만 받아 온다.
+            if IS_MAC:
+                import subprocess
+                subprocess.run(["screencapture", "-x", "-R%d,%d,%d,%d" % (root.winfo_x(), root.winfo_y(), W, H), args.screenshot])
+                root.destroy()
+                return
             import ctypes
             from ctypes import wintypes
             from PIL import Image
@@ -1018,6 +1367,21 @@ def run_gui(args):
                     anim["n"] += 1
                     keys.append(pet_key())
                 res.append("frames: %s" % keys)
+                if tray["on"]:
+                    tm = tray["menu"]
+                    res.append("tray menu: %s" % [tm.entrycget(i, "label") for i in range(tm.index("end") + 1)
+                                                  if tm.type(i) == "command"])
+                    tm.invoke(0)
+                    root.update()
+                    res.append("hide: %s, label now: %s" % (root.state(), tm.entrycget(0, "label")))
+                    tm.invoke(0)
+                    root.update()
+                    res.append("show: %s, label now: %s" % (root.state(), tm.entrycget(0, "label")))
+                    res.append("quit via tray menu")
+                    with open(args.selftest, "w", encoding="utf-8") as f:
+                        f.write("\n".join(res))
+                    tm.invoke(tm.index("end"))
+                    return
             except Exception:
                 res.append(traceback.format_exc())
             with open(args.selftest, "w", encoding="utf-8") as f:

@@ -44,6 +44,18 @@ pip install pillow
 python widget.py
 ```
 
+### Mac에서 실행하기
+
+macOS에서는 Tk 8.6 이상과 Pillow가 필요해요. 자세한 설명은 [README.mac.ko.md](README.mac.ko.md)에 있어요.
+
+```bash
+brew install python-tk
+python3 -m pip install pillow
+python3 widget.py
+```
+
+`./build_mac.sh`를 실행하면 독립 실행형 `TokenHamster.app`으로 만들어 쓸 수도 있어요.
+
 ## 쓰는 법
 
 - 위젯을 끌어서 옮겨요. 위치는 기억돼요.
@@ -79,7 +91,7 @@ python widget.py
 
 - 이 컴퓨터의 Claude Code와 Claude 데스크톱 앱 Code 탭 사용량만 세요. claude.ai 웹이나 다른 컴퓨터에서 쓴 양은 빠져요.
 - 토큰은 입력 + 캐시 쓰기 + 출력이에요. 캐시 읽기는 양이 아주 많아서 뺐어요.
-- Windows 전용이에요.
+- Windows와 macOS를 지원해요.
 - 지금까지 Windows 11 노트북 한 대에서만 시험했어요.
 
 ## 만든 방법

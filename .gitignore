@@ -1,0 +1,7 @@
+dist/
+cache.json
+settings.json
+__pycache__/
+*.pyc
+*.lock
+.DS_Store
