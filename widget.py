@@ -1139,6 +1139,10 @@ def run_gui(args):
             tray["mac_tray"].update_labels(get_tray_labels())
         if tray.get("menu"):
             tray["menu"].entryconfigure(0, label=tr("m_toggle_hide") if widget_shown() else tr("m_toggle_show"))
+            tray["menu"].entryconfigure(1, label=tr("m_refresh"))
+            tray["menu"].entryconfigure(2, label=tr("m_reset"))
+            tray["menu"].entryconfigure(3, label=tr("m_lang"))
+            tray["menu"].entryconfigure(5, label=tr("m_tray_quit"))
     menu_labels()
 
     def switch_lang(to=None):
@@ -1215,22 +1219,24 @@ def run_gui(args):
         tm.add_command(label=tr("m_tray_quit"), command=quit_)
         tray["menu"] = tm
 
+        # 1) Tk 9.x 이상: 내장 tk systray를 우선 사용 (macOS Aqua 환경에서 가장 안정적)
         try:
-            tray["mac_tray"] = MacNativeTray(root, {
-                0: lambda: root.after_idle(toggle_widget),
-                1: lambda: root.after_idle(refresh_evt.set),
-                2: lambda: root.after_idle(lambda: (reset_pos(), widget_shown() or toggle_widget())),
-                3: lambda: root.after_idle(lambda: switch_lang()),
-                4: lambda: root.after_idle(quit_),
-            }, name_now(), tray_image_bytes, get_tray_labels())
+            cb = root.register(tray_click)
+            root.tk.call("tk", "systray", "create", "-image", tray_image("base"), "-text", name_now(),
+                         "-button1", cb, "-button3", cb)
             tray["on"], tray["key"] = True, "base"
-        except Exception:
+        except (tk.TclError, Exception):
+            # 2) Tk 8.6 등 tk systray가 없는 환경: Cocoa NSStatusItem 직접 생성
             try:
-                cb = root.register(tray_click)
-                root.tk.call("tk", "systray", "create", "-image", tray_image("base"), "-text", name_now(),
-                             "-button1", cb, "-button3", cb)
+                tray["mac_tray"] = MacNativeTray(root, {
+                    0: lambda: root.after_idle(toggle_widget),
+                    1: lambda: root.after_idle(refresh_evt.set),
+                    2: lambda: root.after_idle(lambda: (reset_pos(), widget_shown() or toggle_widget())),
+                    3: lambda: root.after_idle(lambda: switch_lang()),
+                    4: lambda: root.after_idle(quit_),
+                }, name_now(), tray_image_bytes, get_tray_labels())
                 tray["on"], tray["key"] = True, "base"
-            except tk.TclError:
+            except Exception:
                 pass
 
     stop = {"v": False}
