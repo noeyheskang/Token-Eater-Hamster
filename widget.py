@@ -94,11 +94,22 @@ def detect_lang():
     """Windows/macOS 표시 언어가 한국어면 ko, 아니면 en."""
     if IS_MAC:
         try:
-            import locale
-            loc = locale.getdefaultlocale()[0] or ""
-            return "ko" if loc.startswith("ko") else "en"
+            lib = _objc()
+            arr = _send(lib.objc_getClass(b"NSLocale"), "preferredLanguages")
+            first = _send(arr, "objectAtIndex:", ctypes.c_void_p, (ctypes.c_ulong,), 0)
+            s = _send(first, "UTF8String", ctypes.c_char_p).decode("utf-8")
+            if s.lower().startswith("ko"):
+                return "ko"
         except Exception:
-            return "en"
+            pass
+        try:
+            for ev in ("LANG", "LC_ALL", "LC_MESSAGES"):
+                val = os.environ.get(ev, "")
+                if val.lower().startswith("ko"):
+                    return "ko"
+        except Exception:
+            pass
+        return "en"
     try:
         return "ko" if (ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF) == 0x12 else "en"
     except Exception:
