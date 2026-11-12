@@ -2,17 +2,19 @@
 
 A small Windows desktop widget that feeds a pixel hamster with the tokens you spend in Claude Code.
 
-![Tori the hamster going from hungry to eating to full](docs/tori.gif)
+![Tori the hamster going from hungry to eating to full](docs/tori_en.gif)
 
 When you use Claude Code, Tori eats sunflower seeds. Leave it alone for a few hours and Tori gets hungry. The widget also shows how many tokens you used in the last 5 hours and the last 7 days.
 
-The screenshots use made-up example logs, not real usage. The widget text is Korean for now.
+The screenshots use made-up example logs, not real usage.
+
+The widget follows your Windows display language (English or Korean). To switch, right-click it and choose **한국어** or **English**.
 
 [한국어 설명](README.ko.md)
 
 ## What it shows
 
-![The four states](docs/states.png)
+![The four states](docs/states_en.png)
 
 | State | When |
 |---|---|
@@ -27,7 +29,7 @@ This is not Anthropic's official usage limit. The widget cannot see your plan li
 
 ## Install
 
-Download `TokenHamster_v1.0.1.zip` from the Releases page, unzip it, and run `TokenHamster.exe`. There is no installer.
+Download `TokenHamster_v1.1.0.zip` from the Releases page, unzip it, and run `TokenHamster.exe`. There is no installer.
 
 Windows shows a "Windows protected your PC" screen because the file is not code-signed. Click **More info**, then **Run anyway**. If you would rather not run an unsigned exe, run it from source instead.
 
@@ -46,7 +48,7 @@ python widget.py
 
 - Drag the widget to move it. The position is remembered.
 - Hover to see token counts per model.
-- Right-click for refresh, rename, reset position, save diagnostics, and quit.
+- Right-click for refresh, rename, reset position, language (English / 한국어), save diagnostics, and quit.
 - Rename gives your hamster its own name, up to 8 characters.
 
 ## What it reads and stores
@@ -57,7 +59,7 @@ python widget.py
 
 ## If it shows nothing
 
-If the widget says "기록을 못 찾았어요" (no logs found) and shows `—`, it found no log file changed in the last 8 days.
+If the widget says "No logs found" and shows `—`, it found no log file changed in the last 8 days.
 
 - If you only use claude.ai in the browser, there are no local logs to read. Use Claude Code in a terminal or the Code tab of the desktop app.
 - If your logs live in WSL or another folder, list that folder under `log_dirs` in `%LOCALAPPDATA%\TokenHamster\settings.json` (next to `widget.py` when run from source). WSL is not scanned automatically because it can hang. Escape backslashes:
@@ -71,7 +73,7 @@ If the widget says "기록을 못 찾았어요" (no logs found) and shows `—`,
   }
   ```
 
-- Otherwise right-click the widget and choose **진단 정보 저장** (save diagnostics). It writes `TokenHamster_진단.txt` to your Desktop. Send that file to the author. It has folder locations, file counts and log key names, but no conversation text, and your user name is masked as `%USERPROFILE%`. From source you can also run `python widget.py --diagnose`.
+- Otherwise right-click the widget and choose **Save diagnostics**. It writes `TokenHamster_diagnostics.txt` (`TokenHamster_진단.txt` in Korean) to your Desktop. Send that file to the author. It has folder locations, file counts and log key names, but no conversation text, and your user name is masked as `%USERPROFILE%`. From source you can also run `python widget.py --diagnose`.
 
 ## Limits
 

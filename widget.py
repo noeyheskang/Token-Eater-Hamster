@@ -4,7 +4,7 @@ import sys, os, re, json, time, threading, queue, argparse, ctypes, platform
 from datetime import datetime
 from ctypes import wintypes
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # 실행 파일(exe)로 묶였을 때는 사용 기록 캐시와 설정을 %LOCALAPPDATA%\TokenHamster 에 둔다.
 FROZEN = getattr(sys, "frozen", False)
@@ -19,10 +19,89 @@ D7 = 7 * 86400
 INK, CREAM, MUTED, HAIR, ORANGE, RED = "#26251e", "#f7f7f4", "#a09c92", "#45433a", "#f54e00", "#cf2d56"
 BAR_NORMAL = "#cfcbbf"
 RECENT = 180                       # 최근 3분 안에 토큰을 썼으면 '먹는 중'
-NAME = "토리"                      # 햄스터 기본 이름 (오른쪽 클릭 > 이름 바꾸기로 사용자마다 바꿈)
-NAME_MAX = 8                       # 이름 최대 글자 수
+NAME_MAX = 8                       # 이름 최대 글자 수 (기본 이름은 TEXT["name"], 오른쪽 클릭 > 이름 바꾸기로 사용자마다 바꿈)
 HUNGRY_BELOW, FULL_FROM = 15, 80   # 평소 최대 대비 %: 이보다 낮으면 배고픔 / 이 이상이면 배부름
-MOOD_TEXT = {"hungry": "배고파요…", "eat": "냠냠 먹는 중", "base": "기분 좋아요", "full": "배불러요!"}
+
+# 화면에 보이는 모든 글. 언어를 더하려면 여기에 한 묶음을 더하면 된다.
+TEXT = {
+    "ko": {
+        "name": "토리",
+        "mood_hungry": "배고파요…", "mood_eat": "냠냠 먹는 중", "mood_base": "기분 좋아요", "mood_full": "배불러요!",
+        "loading": "읽는 중…", "nolog": "기록을 못 찾았어요", "error": "! 오류",
+        "h5": "최근 5시간", "h7": "최근 7일",
+        "m_refresh": "지금 새로고침", "m_rename": "이름 바꾸기", "m_reset": "위치 초기화",
+        "m_lang": "English", "m_diag": "진단 정보 저장", "m_quit": "종료",
+        "rename_title": "이름 바꾸기", "rename_prompt": "햄스터 이름을 적어 주세요 ({n}자까지)",
+        "tip_nolog": ("기록을 못 찾았어요.\n\n"
+                      "Claude Code(터미널) 또는 데스크톱 앱 Code 탭 기록이\n"
+                      "이 PC의 사용자 폴더\\.claude\\projects 에 있어야 해요.\n"
+                      "웹 claude.ai만 쓰면 기록이 없어요.\n"
+                      "WSL이나 다른 폴더라면 settings.json의 log_dirs에\n"
+                      "경로를 넣어 주세요.\n"
+                      "그래도 안 되면 오른쪽 클릭 > 진단 정보 저장."),
+        "tip_h5": "[최근 5시간] {n} 토큰", "tip_h7": "[최근 7일] {n} 토큰",
+        "tip_peak": "7일 중 5시간 최대 {n}",
+        "tip_rules": ("{name} 밥 규칙: 방금(3분 안) 토큰을 쓰면 먹는 중,\n"
+                      "평소 최대의 {lo}% 미만이면 배고픔, {hi}% 이상이면 배부름."),
+        "tip_metric": ("토큰 = 입력 + 캐시 쓰기 + 출력 (캐시 읽기 제외)\n"
+                       "Anthropic 공식 플랜 한도 %가 아니에요.\n"
+                       "이 PC의 Claude Code / 데스크톱 앱 Code 탭\n"
+                       "로그만 집계해요 (웹 claude.ai, 다른 PC 제외)."),
+        "tip_updated": "마지막 갱신 {t}",
+        "diag_file": "TokenHamster_진단.txt",
+    },
+    "en": {
+        "name": "Tori",
+        "mood_hungry": "Hungry…", "mood_eat": "Munching", "mood_base": "Happy", "mood_full": "Full!",
+        "loading": "Loading…", "nolog": "No logs found", "error": "! Error",
+        "h5": "Last 5h", "h7": "Last 7d",
+        "m_refresh": "Refresh now", "m_rename": "Rename", "m_reset": "Reset position",
+        "m_lang": "한국어", "m_diag": "Save diagnostics", "m_quit": "Quit",
+        "rename_title": "Rename", "rename_prompt": "Name your hamster (up to {n} characters)",
+        "tip_nolog": ("No logs found.\n\n"
+                      "Claude Code (terminal) or Claude desktop app Code tab logs\n"
+                      "must be in your user folder\\.claude\\projects on this PC.\n"
+                      "If you only use claude.ai on the web, there are no logs.\n"
+                      "For WSL or another folder, add the path to log_dirs\n"
+                      "in settings.json.\n"
+                      "Still stuck? Right-click > Save diagnostics."),
+        "tip_h5": "[Last 5h] {n} tokens", "tip_h7": "[Last 7d] {n} tokens",
+        "tip_peak": "Peak 5h within 7 days: {n}",
+        "tip_rules": ("{name}'s food rules: eating if you used tokens\n"
+                      "in the last 3 min, hungry below {lo}% of your\n"
+                      "usual peak, full at {hi}% or more."),
+        "tip_metric": ("Tokens = input + cache writes + output (cache reads excluded)\n"
+                       "This is not Anthropic's official plan limit %.\n"
+                       "Counts only Claude Code / desktop app Code tab logs\n"
+                       "on this PC (not claude.ai web, not other PCs)."),
+        "tip_updated": "Last updated {t}",
+        "diag_file": "TokenHamster_diagnostics.txt",
+    },
+}
+LANG = "ko"
+
+
+def tr(key, **kw):
+    s = TEXT.get(LANG, TEXT["ko"])[key]
+    return s.format(**kw) if kw else s
+
+
+def detect_lang():
+    """Windows 표시 언어가 한국어면 ko, 아니면 en."""
+    try:
+        return "ko" if (ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF) == 0x12 else "en"
+    except Exception:
+        return "en"
+
+
+def resolve_lang(cli=None):
+    """--lang > settings.json의 lang > Windows 표시 언어."""
+    if cli in TEXT:
+        return cli
+    v = read_settings().get("lang")
+    return v if v in TEXT else detect_lang()
+
+
 SEED = ("..#..", ".###.", ".###.", "#####", "#####", "#####", ".###.")      # 게이지용 씨앗 모양
 
 
@@ -229,7 +308,27 @@ def compute(merged, now=None, info=None):
             "by_model_7d": dict(sorted(((k, v) for k, v in by7.items() if v), key=lambda x: -x[1]))}
 
 
+def fmt_en(n):
+    """영어 숫자: 1.2K, 612.3K, 6.12M, 92.1M, 612M, 1.23B."""
+    n = int(n)
+    if n < 1000:
+        return str(n)
+    if round(n / 1e3, 1) < 1000:
+        return "%.1fK" % (n / 1e3)
+    for unit, div in (("M", 1e6), ("B", 1e9)):
+        v = n / div
+        if unit == "B" or round(v) < 1000:
+            if round(v, 2) < 10:
+                return "%.2f%s" % (v, unit)
+            if round(v, 1) < 100:
+                return "%.1f%s" % (v, unit)
+            return "%d%s" % (round(v), unit)
+    return str(n)
+
+
 def fmt(n):
+    if LANG == "en":
+        return fmt_en(n)
     n = int(n)
     if n < 10000:
         return "{:,}".format(n)
@@ -445,7 +544,7 @@ def desktop_dir():
 
 
 def save_diagnose(open_it=True):
-    out = os.path.join(desktop_dir(), "TokenHamster_진단.txt")
+    out = os.path.join(desktop_dir(), tr("diag_file"))
     with open(out, "w", encoding="utf-8-sig", newline="\r\n") as f:
         f.write(diagnose_text())
     if open_it:
@@ -486,11 +585,18 @@ def run_gui(args):
     root.overrideredirect(True)
     root.attributes("-topmost", True)
     root.configure(bg=INK)
+    global LANG
+    LANG = resolve_lang(args.lang)
     fams = set(tkfont.families())
-    fam = "Pretendard" if "Pretendard" in fams else "Malgun Gothic"
+    all_fonts = []
+
+    def fam():
+        return "Pretendard" if "Pretendard" in fams else "Malgun Gothic" if LANG == "ko" else "Segoe UI"
 
     def F(px, bold=False):
-        return tkfont.Font(family=fam, size=-int(px * S), weight="bold" if bold else "normal")
+        f = tkfont.Font(family=fam(), size=-int(px * S), weight="bold" if bold else "normal")
+        all_fonts.append(f)
+        return f
     f_title, f_small, f_lab = F(13, True), F(10), F(11)
     f_num, f_pct = F(16, True), F(11, True)
 
@@ -514,10 +620,10 @@ def run_gui(args):
     settings = read_settings()
 
     def save_settings():
-        # 실행 중에 사용자가 고친 log_dirs 같은 다른 항목을 덮어쓰지 않도록, 파일을 다시 읽어 x, y, name만 바꾼다.
+        # 실행 중에 사용자가 고친 log_dirs 같은 다른 항목을 덮어쓰지 않도록, 파일을 다시 읽어 x, y, name, lang만 바꾼다.
         try:
             disk = read_settings()
-            for k in ("x", "y", "name"):
+            for k in ("x", "y", "name", "lang"):
                 if k in settings:
                     disk[k] = settings[k]
                 else:
@@ -528,7 +634,8 @@ def run_gui(args):
             pass
 
     # 햄스터 이름: 사용자마다 settings.json에 따로 저장한다 (오른쪽 클릭 > 이름 바꾸기)
-    pet_name = {"v": (args.name or settings.get("name") or NAME)[:NAME_MAX]}
+    def name_now():
+        return (args.name or settings.get("name") or tr("name"))[:NAME_MAX]
 
     def default_pos():
         l, t, r, b = work_area()
@@ -596,19 +703,19 @@ def run_gui(args):
 
         # 오른쪽: 이름·상태, 사용량, 씨앗 게이지
         x0, x1 = 164 * s, 298 * s
-        name = pet_name["v"]
+        name = name_now()
         cv.create_text(x0, 15 * s, text=name, anchor="w", fill=CREAM, font=f_title)
-        status = "읽는 중…" if d is None else "기록을 못 찾았어요" if nolog() else MOOD_TEXT[mood()]
+        status = tr("loading") if d is None else tr("nolog") if nolog() else tr("mood_" + mood())
         right = "" if nolog() and not state["err"] else state["stamp"]
         if state["err"]:
-            right = "! 오류 " + state["stamp"]
+            right = tr("error") + " " + state["stamp"]
         cv.create_text(x1, 15 * s, text=right, anchor="e", fill=MUTED, font=f_small)
         sx = x0 + f_title.measure(name) + 6 * s
         if sx + f_small.measure(status) <= x1 - f_small.measure(right) - 6 * s:   # 이름이 길면 상태 글은 생략
             cv.create_text(sx, 15 * s, text=status, anchor="w", fill=MUTED, font=f_small)
         cv.create_line(x0, 27 * s, x1, 27 * s, fill=HAIR)
-        cv.create_text(x0, 43 * s, text="최근 5시간", anchor="w", fill=MUTED, font=f_lab)
-        cv.create_text(x0, 64 * s, text="최근 7일", anchor="w", fill=MUTED, font=f_lab)
+        cv.create_text(x0, 43 * s, text=tr("h5"), anchor="w", fill=MUTED, font=f_lab)
+        cv.create_text(x0, 64 * s, text=tr("h7"), anchor="w", fill=MUTED, font=f_lab)
         if d is None:
             return
         if nolog():
@@ -644,35 +751,22 @@ def run_gui(args):
     def tip_text():
         d = state["data"]
         if d is None:
-            return "읽는 중…"
+            return tr("loading")
+        upd = tr("tip_updated", t=datetime.fromtimestamp(d["now"]).strftime("%Y-%m-%d %H:%M:%S"))
         if nolog():
-            return "\n".join([
-                "기록을 못 찾았어요.",
-                "",
-                "Claude Code(터미널) 또는 데스크톱 앱 Code 탭 기록이",
-                "이 PC의 사용자 폴더\\.claude\\projects 에 있어야 해요.",
-                "웹 claude.ai만 쓰면 기록이 없어요.",
-                "WSL이나 다른 폴더라면 settings.json의 log_dirs에",
-                "경로를 넣어 주세요.",
-                "그래도 안 되면 오른쪽 클릭 > 진단 정보 저장.",
-                "",
-                "마지막 갱신 " + datetime.fromtimestamp(d["now"]).strftime("%Y-%m-%d %H:%M:%S")])
-        L = ["[최근 5시간] " + fmt(d["tokens_5h"]) + " 토큰"]
+            return tr("tip_nolog") + "\n\n" + upd
+        L = [tr("tip_h5", n=fmt(d["tokens_5h"]))]
         for m, v in d["by_model_5h"].items():
             L.append("   %s  %s" % (short_model(m), fmt(v)))
-        L.append("[최근 7일] " + fmt(d["tokens_7d"]) + " 토큰")
+        L.append(tr("tip_h7", n=fmt(d["tokens_7d"])))
         for m, v in d["by_model_7d"].items():
             L.append("   %s  %s" % (short_model(m), fmt(v)))
-        L.append("7일 중 5시간 최대 " + fmt(d["max_5h_in_7d"]))
+        L.append(tr("tip_peak", n=fmt(d["max_5h_in_7d"])))
         L.append("")
-        L.append("%s 밥 규칙: 방금(3분 안) 토큰을 쓰면 먹는 중," % pet_name["v"])
-        L.append("평소 최대의 %d%% 미만이면 배고픔, %d%% 이상이면 배부름." % (HUNGRY_BELOW, FULL_FROM))
+        L.append(tr("tip_rules", name=name_now(), lo=HUNGRY_BELOW, hi=FULL_FROM))
         L.append("")
-        L.append("토큰 = 입력 + 캐시 쓰기 + 출력 (캐시 읽기 제외)")
-        L.append("Anthropic 공식 플랜 한도 %가 아니에요.")
-        L.append("이 PC의 Claude Code / 데스크톱 앱 Code 탭")
-        L.append("로그만 집계해요 (웹 claude.ai, 다른 PC 제외).")
-        L.append("마지막 갱신 " + datetime.fromtimestamp(d["now"]).strftime("%Y-%m-%d %H:%M:%S"))
+        L.append(tr("tip_metric"))
+        L.append(upd)
         return "\n".join(L)
 
     def hide_tip(_e=None):
@@ -742,14 +836,14 @@ def run_gui(args):
     def rename():
         from tkinter import simpledialog
         hide_tip()
-        new = simpledialog.askstring("이름 바꾸기", "햄스터 이름을 적어 주세요 (%d자까지)" % NAME_MAX,
-                                     initialvalue=pet_name["v"], parent=root)
+        new = simpledialog.askstring(tr("rename_title"), tr("rename_prompt", n=NAME_MAX),
+                                     initialvalue=name_now(), parent=root)
         if new is None:
             return
         new = " ".join(new.split())[:NAME_MAX]
         if not new:
             return
-        pet_name["v"] = settings["name"] = new
+        settings["name"] = new
         save_settings()
         draw()
 
@@ -769,12 +863,30 @@ def run_gui(args):
 
     menu = tk.Menu(root, tearoff=0, bg=INK, fg=CREAM, activebackground=ORANGE, activeforeground=CREAM,
                    font=F(11), bd=0)
-    menu.add_command(label="지금 새로고침", command=refresh_evt.set)
-    menu.add_command(label="이름 바꾸기", command=rename)
-    menu.add_command(label="위치 초기화", command=reset_pos)
-    menu.add_command(label="진단 정보 저장", command=diag_save)
+    menu.add_command(command=refresh_evt.set)
+    menu.add_command(command=rename)
+    menu.add_command(command=reset_pos)
+    menu.add_command(command=lambda: switch_lang())
+    menu.add_command(command=diag_save)
     menu.add_separator()
-    menu.add_command(label="종료", command=quit_)
+    menu.add_command(command=quit_)
+
+    def menu_labels():
+        for i, k in zip((0, 1, 2, 3, 4, 6), ("m_refresh", "m_rename", "m_reset", "m_lang", "m_diag", "m_quit")):
+            menu.entryconfigure(i, label=tr(k))
+    menu_labels()
+
+    def switch_lang(to=None):
+        """ko <-> en. 고른 언어는 settings.json에 저장한다."""
+        global LANG
+        hide_tip()
+        LANG = to or ("en" if LANG == "ko" else "ko")
+        settings["lang"] = LANG
+        save_settings()
+        for f in all_fonts:
+            f.configure(family=fam())
+        menu_labels()
+        draw()
     cv.bind("<Button-3>", lambda e: (hide_tip(), menu.tk_popup(e.x_root, e.y_root)))
 
     stop = {"v": False}
@@ -888,8 +1000,18 @@ def run_gui(args):
                 root.update()
                 res.append("reset: %s, back at default: %s" % ("x" not in settings,
                                                             (root.winfo_x(), root.winfo_y()) == default_pos()))
-                res.append("menu items: %s" % [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)
-                                               if menu.type(i) == "command"])
+                res.append("lang: %s, menu items: %s" % (LANG, [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)
+                                                               if menu.type(i) == "command"]))
+                before = LANG
+                switch_lang()
+                root.update()
+                res.append("switched %s -> %s, saved: %s, menu: %s" % (
+                    before, LANG, read_settings().get("lang") == LANG,
+                    [menu.entrycget(i, "label") for i in range(menu.index("end") + 1) if menu.type(i) == "command"]))
+                res.append("tip(%s) first line: %r, fmt(92105926)=%s" % (LANG, tip_text().split("\n")[0], fmt(92105926)))
+                switch_lang(before)
+                root.update()
+                res.append("back to %s, saved: %s" % (LANG, read_settings().get("lang") == LANG))
                 anim["n"] = 0
                 keys = []
                 for _ in range(12):
@@ -923,6 +1045,7 @@ def main():
     ap.add_argument("--name", help="이번 실행에서만 쓸 햄스터 이름 (저장하지 않음)")
     ap.add_argument("--selftest", help="툴팁·끌기·메뉴 자동 시험 결과를 적을 파일 경로")
     ap.add_argument("--diagnose", action="store_true", help="진단 정보를 화면에 출력")
+    ap.add_argument("--lang", choices=sorted(TEXT), help="이번 실행에서만 쓸 언어 (저장하지 않음)")
     ap.add_argument("--demo", help="사진용 예시 상태. 평소 최대 대비 %%[,eat] (예: 92 또는 46,eat)")
     args = ap.parse_args()
     if args.diagnose:
@@ -937,6 +1060,8 @@ def main():
             sys.stdout.reconfigure(encoding="utf-8")
         except Exception:
             pass
+        global LANG
+        LANG = resolve_lang(args.lang)
         t = time.time()
         info = {}
         r = compute(scan(args.now, info), args.now, info)
