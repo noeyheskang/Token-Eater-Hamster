@@ -1279,6 +1279,7 @@ def run_gui(args):
                 state["stamp"] = datetime.now().strftime("%H:%M")
                 state["shown"] = True
                 draw()
+                tray_update()
                 root.attributes("-topmost", True)
         except queue.Empty:
             pass

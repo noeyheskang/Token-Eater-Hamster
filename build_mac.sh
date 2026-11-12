@@ -62,7 +62,43 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-cat > "$APP/Contents/MacOS/TokenHamster" <<'SH'
+# macOS Sonoma/Sequoia 등에서는 스크립트 실행 후 exec python 시 번들 식별자(CFBundleExecutable)와
+# 프로세스 불일치로 ControlCenter의 NSStatusItem 연결이 거부되므로, 네이티브 런처 바이너리를 우선 빌드한다.
+COMPILED=0
+TMP_C=$(mktemp /tmp/token_hamster_launcher.XXXXXX.c)
+if command -v clang >/dev/null 2>&1 && command -v python3-config >/dev/null 2>&1; then
+  cat > "$TMP_C" <<'C'
+#include <Python.h>
+#include <mach-o/dyld.h>
+#include <libgen.h>
+#include <limits.h>
+
+int main(int argc, char **argv) {
+    char path[PATH_MAX];
+    uint32_t size = sizeof(path);
+    _NSGetExecutablePath(path, &size);
+    char *dir = dirname(path);
+    char script[PATH_MAX];
+    snprintf(script, sizeof(script), "%s/../Resources/widget.py", dir);
+
+    wchar_t **w_argv = (wchar_t **)malloc(sizeof(wchar_t *) * (argc + 2));
+    w_argv[0] = Py_DecodeLocale(argv[0], NULL);
+    w_argv[1] = Py_DecodeLocale(script, NULL);
+    for (int i = 1; i < argc; i++) {
+        w_argv[i + 1] = Py_DecodeLocale(argv[i], NULL);
+    }
+    w_argv[argc + 1] = NULL;
+    return Py_Main(argc + 1, w_argv);
+}
+C
+  if clang $(python3-config --cflags) "$TMP_C" -o "$APP/Contents/MacOS/TokenHamster" $(python3-config --ldflags --embed) 2>/dev/null; then
+    COMPILED=1
+  fi
+  rm -f "$TMP_C"
+fi
+
+if [ "$COMPILED" -eq 0 ]; then
+  cat > "$APP/Contents/MacOS/TokenHamster" <<'SH'
 #!/bin/bash
 # Tk와 Pillow가 있는 Python 3을 찾아 위젯을 띄운다.
 RES="$(cd "$(dirname "$0")/../Resources" && pwd)"
@@ -74,5 +110,6 @@ done
 osascript -e 'display alert "TokenHamster" message "Tk 8.6 이상과 Pillow가 있는 Python 3이 필요합니다.\n\nbrew install python-tk\npython3 -m pip install pillow"' >/dev/null
 exit 1
 SH
-chmod +x "$APP/Contents/MacOS/TokenHamster"
-echo "만듦: $APP"
+  chmod +x "$APP/Contents/MacOS/TokenHamster"
+fi
+echo "만듦: $APP (런처: $([ $COMPILED -eq 1 ] && echo '네이티브 바이너리' || echo '셸 스크립트'))"
