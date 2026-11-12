@@ -79,7 +79,6 @@ If the widget says "No logs found" and shows `—`, it found no log file changed
 
 - Counts only Claude Code and the Code tab of the Claude desktop app on this PC. Usage on claude.ai or on another computer is not included.
 - Tokens are input + cache writes + output. Cache reads are left out because they are very large and would hide everything else.
-- Windows only.
 - Tested on one Windows 11 laptop so far.
 
 ## How it was made
