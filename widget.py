@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """Claude 사용량 위젯: 로컬 Claude Code 로그에서 토큰 사용량을 읽어 보여 준다."""
-import sys, os, json, time, threading, queue, argparse, ctypes
+import sys, os, re, json, time, threading, queue, argparse, ctypes, platform
 from datetime import datetime
 from ctypes import wintypes
 
+VERSION = "1.0.1"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_ROOT = os.path.join(os.path.expanduser("~"), ".claude", "projects")
 # 실행 파일(exe)로 묶였을 때는 사용 기록 캐시와 설정을 %LOCALAPPDATA%\TokenHamster 에 둔다.
 FROZEN = getattr(sys, "frozen", False)
 DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "TokenHamster") if FROZEN else APP_DIR
@@ -55,18 +55,61 @@ def save_cache(c):
         pass
 
 
-def list_logs(now):
-    out = []
-    for dp, _dn, fn in os.walk(LOG_ROOT):
-        for n in fn:
-            if n.endswith(".jsonl"):
-                p = os.path.join(dp, n)
-                try:
-                    st = os.stat(p)
-                except OSError:
-                    continue
-                if now - st.st_mtime <= KEEP_SEC:
-                    out.append((p, st.st_size, st.st_mtime))
+def read_settings():
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def log_roots():
+    """기록을 찾을 폴더 목록: CLAUDE_CONFIG_DIR 아래 projects, 사용자 폴더 아래 .claude/projects, settings.json의 log_dirs."""
+    cands = []
+    cd = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cd and cd.strip():
+        cands.append(os.path.join(os.path.expandvars(cd.strip().strip('"')), "projects"))
+    cands.append(os.path.join(os.path.expanduser("~"), ".claude", "projects"))
+    extra = read_settings().get("log_dirs")
+    if isinstance(extra, list):
+        for e in extra:
+            if isinstance(e, str) and e.strip():
+                cands.append(os.path.expandvars(e.strip().strip('"')))
+    out, seen = [], set()
+    for c in cands:
+        try:
+            key = os.path.normcase(os.path.realpath(c))
+        except Exception:
+            key = os.path.normcase(os.path.abspath(c))
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out
+
+
+def list_logs(now, info=None):
+    """최근 8일 안에 바뀐 .jsonl 목록. info가 있으면 roots_found, files_8d를 채운다."""
+    out, seen, found = [], set(), 0
+    for root in log_roots():
+        if not os.path.isdir(root):
+            continue
+        found += 1
+        for dp, _dn, fn in os.walk(root):
+            for n in fn:
+                if n.endswith(".jsonl"):
+                    p = os.path.join(dp, n)
+                    try:
+                        st = os.stat(p)
+                    except OSError:
+                        continue
+                    k = os.path.normcase(os.path.realpath(p))
+                    if now - st.st_mtime <= KEEP_SEC and k not in seen:
+                        seen.add(k)
+                        out.append((p, st.st_size, st.st_mtime))
+    if info is not None:
+        info["roots_found"] = found
+        info["files_8d"] = len(out)
     return out
 
 
@@ -110,14 +153,14 @@ def read_new(path, ent, size):
         msgs[mid] = [ts, model] + v
 
 
-def scan(now=None):
+def scan(now=None, info=None):
     """증분 스캔 후 {id: [ts, model, in, cc, out]} 반환(파일 간 중복 제거)."""
     now = now or time.time()
     cache = load_cache()
     files = cache["files"]
     seen = set()
     changed = False
-    for path, size, mt in list_logs(now):
+    for path, size, mt in list_logs(now, info):
         seen.add(path)
         ent = files.get(path)
         if ent is None or size < ent["off"] or size < ent.get("size", 0):
@@ -156,7 +199,7 @@ def scan(now=None):
 
 
 # ---------------------------------------------------------------- 계산
-def compute(merged, now=None):
+def compute(merged, now=None, info=None):
     now = now or time.time()
     ev = sorted((r[0], r[2] + r[3] + r[4], r[1]) for r in merged.values()
                 if now - D7 <= r[0] <= now)
@@ -179,7 +222,8 @@ def compute(merged, now=None):
     mx = max(mx, t5)
     pct = (t5 / mx * 100) if mx else 0.0
     recent = sum(tok for ts, tok, _m in ev if ts >= now - RECENT)       # 방금 쓴 토큰 = 햄스터가 먹는 중
-    return {"now": now, "tokens_5h": t5, "tokens_7d": t7, "max_5h_in_7d": mx, "tokens_recent": recent,
+    info = info or {}
+    return {"now": now, "roots_found": info.get("roots_found"), "files_8d": info.get("files_8d"), "tokens_5h": t5, "tokens_7d": t7, "max_5h_in_7d": mx, "tokens_recent": recent,
             "pct_of_max": round(pct, 1), "messages_7d": len(ev),
             "by_model_5h": dict(sorted(((k, v) for k, v in by5.items() if v), key=lambda x: -x[1])),
             "by_model_7d": dict(sorted(((k, v) for k, v in by7.items() if v), key=lambda x: -x[1]))}
@@ -198,6 +242,215 @@ def fmt(n):
 
 def short_model(m):
     return m[7:] if m.startswith("claude-") else m
+
+
+# ---------------------------------------------------------------- 진단
+def _mask_fn():
+    """경로 속 사용자 폴더·LOCALAPPDATA 값을 %USERPROFILE%, %LOCALAPPDATA%로 바꾸는 함수를 만든다."""
+    pairs = []
+    for var, tag in (("LOCALAPPDATA", "%LOCALAPPDATA%"), ("USERPROFILE", "%USERPROFILE%")):
+        v = os.environ.get(var)
+        if v:
+            pairs.append((v, tag))
+    home = os.path.expanduser("~")
+    if home:
+        pairs.append((home, "%USERPROFILE%"))
+    pairs.sort(key=lambda x: -len(x[0]))
+    uname = os.path.basename(os.path.normpath(home)) if home else ""
+
+    def mask(text):
+        text = str(text)
+        for v, tag in pairs:
+            text = re.sub(re.escape(v), lambda _m, t=tag: t, text, flags=re.I)
+        text = re.sub(r"[^\\/\s,]*@[^\\/\s,]*", "<email>", text)      # 폴더 이름에 이메일이 있으면 가린다
+        if len(uname) >= 4:                      # 다른 곳에 사용자 이름이 따로 보이면 그것도 가린다
+            text = re.sub(r"(?<![A-Za-z0-9%])" + re.escape(uname) + r"(?![A-Za-z0-9%])", "<user>", text)
+        return text
+    return mask
+
+
+def _tail_stats(path, limit=2 * 1024 * 1024):
+    """파일 끝 2MB만 읽어 줄 수와 키 이름 같은 '모양'만 센다. 값(대화 내용)은 읽어도 내보내지 않는다."""
+    st = {"lines": 0, "assistant": 0, "usage": 0, "bad": 0, "top": set(), "ukeys": set(), "tsfmt": None}
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        start = max(0, size - limit)
+        f.seek(start)
+        data = f.read()
+    lines = data.split(b"\n")
+    if start > 0 and lines:
+        lines = lines[1:]                        # 잘린 첫 줄은 버린다
+    safe = re.compile(r"^[\w.\-]{1,40}$")
+    for ln in lines:
+        if not ln.strip():
+            continue
+        st["lines"] += 1
+        if b'"assistant"' not in ln:
+            continue
+        try:
+            d = json.loads(ln.decode("utf-8", errors="ignore"))
+        except Exception:
+            st["bad"] += 1
+            continue
+        if not isinstance(d, dict) or d.get("type") != "assistant":
+            continue
+        st["assistant"] += 1
+        st["top"].update(k for k in d if safe.match(str(k)))
+        m = d.get("message")
+        u = m.get("usage") if isinstance(m, dict) else None
+        if isinstance(u, dict):
+            st["usage"] += 1
+            st["ukeys"].update(k for k in u if safe.match(str(k)))
+        t = d.get("timestamp")
+        if st["tsfmt"] is None and isinstance(t, str) and len(t) <= 40:
+            st["tsfmt"] = re.sub(r"\d", "d", t)
+        elif st["tsfmt"] is None and t is not None:
+            st["tsfmt"] = "(%s)" % type(t).__name__
+    return st
+
+
+def diagnose_text():
+    """보내도 안전한 진단 정보. 대화 내용과 사용자 이름은 넣지 않는다."""
+    mask = _mask_fn()
+    now = time.time()
+    L = []
+    A = L.append
+    A("TokenHamster 진단 정보 / diagnostics")
+    A("작성 시각: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    A("이 파일에는 대화 내용이 없고 사용자 이름은 가렸어요. (no conversation text, user name masked)")
+    A("")
+    A("[프로그램]")
+    A("widget version: " + VERSION)
+    A("실행 방식: " + ("exe (frozen)" if FROZEN else "소스 (python)"))
+    A("platform: " + platform.platform())
+    A("python: " + platform.python_version())
+    A("")
+    A("[Claude 설정 폴더]")
+    cd = os.environ.get("CLAUDE_CONFIG_DIR")
+    A("CLAUDE_CONFIG_DIR: " + (("설정됨 " + mask(cd)) if cd else "설정 안 됨 (not set)"))
+    cl = os.path.join(os.path.expanduser("~"), ".claude")
+    A("%USERPROFILE%\\.claude 있음: " + str(os.path.isdir(cl)))
+    if os.path.isdir(cl):
+        try:
+            names = sorted(mask(n) for n in os.listdir(cl))
+        except OSError as ex:
+            names = ["(읽기 실패: %s)" % type(ex).__name__]
+        A("  안에 있는 것(이름만): " + (", ".join(names) if names else "(비어 있음)"))
+    A("")
+    A("[기록 폴더 (roots)]")
+    roots = log_roots()
+    newest = []                                  # (mtime, path)
+    for r in roots:
+        A("- " + mask(r))
+        ex = os.path.isdir(r)
+        A("    exists: " + str(ex))
+        if not ex:
+            continue
+        total = recent = 0
+        mb = 0.0
+        nm = 0
+        for dp, _dn, fn in os.walk(r):
+            for n in fn:
+                if not n.endswith(".jsonl"):
+                    continue
+                total += 1
+                p = os.path.join(dp, n)
+                try:
+                    stt = os.stat(p)
+                except OSError:
+                    continue
+                nm = max(nm, stt.st_mtime)
+                newest.append((stt.st_mtime, p))
+                if now - stt.st_mtime <= KEEP_SEC:
+                    recent += 1
+                    mb += stt.st_size / 1048576
+        A("    .jsonl 전체: %d" % total)
+        A("    .jsonl 최근 8일 안에 바뀜: %d" % recent)
+        A("    그 파일들 크기 합: %.1f MB" % mb)
+        A("    가장 최근 파일 수정 시각: " + (datetime.fromtimestamp(nm).strftime("%Y-%m-%d %H:%M:%S") if nm else "(없음)"))
+    A("")
+    A("[최근 파일 3개의 모양 (끝 2MB까지, 값은 읽어도 적지 않음)]")
+    newest.sort(reverse=True)
+    seen_p = set()
+    k = 0
+    for mt, p in newest:
+        key = os.path.normcase(os.path.realpath(p))
+        if key in seen_p:
+            continue
+        seen_p.add(key)
+        k += 1
+        if k > 3:
+            break
+        A("- 파일 %d (수정 %s)" % (k, datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M:%S")))
+        try:
+            st = _tail_stats(p)
+        except Exception as ex:
+            A("    읽기 실패: " + type(ex).__name__)
+            continue
+        A("    전체 줄 수: %d" % st["lines"])
+        A('    "type":"assistant" 줄: %d' % st["assistant"])
+        A("    그중 message.usage 있음: %d" % st["usage"])
+        A("    JSON 해석 실패: %d" % st["bad"])
+        A("    assistant 줄의 최상위 키 이름: " + ", ".join(sorted(st["top"])))
+        A("    usage 키 이름: " + ", ".join(sorted(st["ukeys"])))
+        A("    timestamp 모양: " + (st["tsfmt"] or "(없음)"))
+    if not newest:
+        A("(기록 파일이 하나도 없어요)")
+    A("")
+    A("[계산 결과]")
+    info = {}
+    try:
+        r = compute(scan(None, info), None, info)
+        A("roots_found: %s, files_8d: %s" % (r["roots_found"], r["files_8d"]))
+        A("tokens_5h: %d" % r["tokens_5h"])
+        A("tokens_7d: %d" % r["tokens_7d"])
+        A("max_5h: %d" % r["max_5h_in_7d"])
+        A("messages_7d: %d" % r["messages_7d"])
+        A("오류: 없음")
+    except Exception as ex:
+        A("roots_found: %s, files_8d: %s" % (info.get("roots_found"), info.get("files_8d")))
+        A("오류: " + mask("%s: %s" % (type(ex).__name__, ex)))
+    A("")
+    A("[기타]")
+    try:
+        csz = os.path.getsize(CACHE_PATH)
+        A("cache: %s (%.1f KB)" % (mask(CACHE_PATH), csz / 1024))
+    except OSError:
+        A("cache: %s (없음)" % mask(CACHE_PATH))
+    ld = read_settings().get("log_dirs")
+    A("settings.json 있음: %s, log_dirs 개수: %d" % (os.path.isfile(SETTINGS_PATH), len(ld) if isinstance(ld, list) else 0))
+    wsl = os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "wsl.exe")
+    A("wsl.exe 있음: %s (WSL 안의 기록은 자동으로 찾지 않아요. log_dirs에 경로를 넣어야 해요)" % os.path.isfile(wsl))
+    return "\n".join(L) + "\n"
+
+
+def desktop_dir():
+    """진짜 바탕화면 폴더(OneDrive로 옮겨졌어도). 실패하면 ~/Desktop."""
+    try:
+        class GUID(ctypes.Structure):
+            _fields_ = [("a", ctypes.c_uint32), ("b", ctypes.c_uint16), ("c", ctypes.c_uint16), ("d", ctypes.c_ubyte * 8)]
+        g = GUID(0xB4BFCC3A, 0xDB2C, 0x424C, (ctypes.c_ubyte * 8)(0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41))
+        pth = ctypes.c_wchar_p()
+        sh = ctypes.windll.shell32
+        sh.SHGetKnownFolderPath.argtypes = [ctypes.POINTER(GUID), wintypes.DWORD, wintypes.HANDLE,
+                                            ctypes.POINTER(ctypes.c_wchar_p)]
+        if sh.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(pth)) == 0 and pth.value:
+            v = pth.value
+            ctypes.windll.ole32.CoTaskMemFree(pth)
+            if os.path.isdir(v):
+                return v
+    except Exception:
+        pass
+    return os.path.join(os.path.expanduser("~"), "Desktop")
+
+
+def save_diagnose(open_it=True):
+    out = os.path.join(desktop_dir(), "TokenHamster_진단.txt")
+    with open(out, "w", encoding="utf-8-sig", newline="\r\n") as f:
+        f.write(diagnose_text())
+    if open_it:
+        os.startfile(out)
+    return out
 
 
 # ---------------------------------------------------------------- GUI
@@ -258,17 +511,19 @@ def run_gui(args):
             "eat0": sprite(mp.eating(0)), "eat1": sprite(mp.eating(1)), "full": sprite(mp.full())}
     bowls = [sprite(mp.bowl(i), crop=True) for i in range(4)]
 
-    settings = {}
-    try:
-        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-            settings = json.load(f)
-    except Exception:
-        pass
+    settings = read_settings()
 
     def save_settings():
+        # 실행 중에 사용자가 고친 log_dirs 같은 다른 항목을 덮어쓰지 않도록, 파일을 다시 읽어 x, y, name만 바꾼다.
         try:
+            disk = read_settings()
+            for k in ("x", "y", "name"):
+                if k in settings:
+                    disk[k] = settings[k]
+                else:
+                    disk.pop(k, None)
             with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-                json.dump(settings, f, ensure_ascii=False)
+                json.dump(disk, f, ensure_ascii=False)
         except Exception:
             pass
 
@@ -301,11 +556,18 @@ def run_gui(args):
 
     anim = {"n": 0, "key": None, "pet": None}
 
+    def nolog():
+        """읽을 기록 파일이 하나도 없는 상태 (0과 다르다)."""
+        d = state["data"]
+        return d is not None and d.get("files_8d") == 0
+
     def mood():
         """토큰 사용량으로 햄스터 상태를 정한다."""
         d = state["data"]
         if d is None:
             return "base"
+        if nolog():
+            return "hungry"
         if d.get("tokens_recent", 0) > 0:
             return "eat"
         pct = d["pct_of_max"]
@@ -336,8 +598,8 @@ def run_gui(args):
         x0, x1 = 164 * s, 298 * s
         name = pet_name["v"]
         cv.create_text(x0, 15 * s, text=name, anchor="w", fill=CREAM, font=f_title)
-        status = "읽는 중…" if d is None else MOOD_TEXT[mood()]
-        right = state["stamp"]
+        status = "읽는 중…" if d is None else "기록을 못 찾았어요" if nolog() else MOOD_TEXT[mood()]
+        right = "" if nolog() and not state["err"] else state["stamp"]
         if state["err"]:
             right = "! 오류 " + state["stamp"]
         cv.create_text(x1, 15 * s, text=right, anchor="e", fill=MUTED, font=f_small)
@@ -349,8 +611,13 @@ def run_gui(args):
         cv.create_text(x0, 64 * s, text="최근 7일", anchor="w", fill=MUTED, font=f_lab)
         if d is None:
             return
-        cv.create_text(x1, 43 * s, text=fmt(d["tokens_5h"]), anchor="e", fill=CREAM, font=f_num)
-        cv.create_text(x1, 64 * s, text=fmt(d["tokens_7d"]), anchor="e", fill=CREAM, font=f_num)
+        if nolog():
+            pct = 0
+            cv.create_text(x1, 43 * s, text="—", anchor="e", fill=CREAM, font=f_num)
+            cv.create_text(x1, 64 * s, text="—", anchor="e", fill=CREAM, font=f_num)
+        else:
+            cv.create_text(x1, 43 * s, text=fmt(d["tokens_5h"]), anchor="e", fill=CREAM, font=f_num)
+            cv.create_text(x1, 64 * s, text=fmt(d["tokens_7d"]), anchor="e", fill=CREAM, font=f_num)
         col = RED if pct >= 95 else ORANGE if pct >= 80 else CREAM
         filled = min(10, -(-int(pct * 10) // 100))           # 10%마다 씨앗 하나 (올림)
         u = max(1, int(S))
@@ -362,7 +629,7 @@ def run_gui(args):
                     if ch == "#":
                         cv.create_rectangle(gx + k * u, gy + r * u, gx + (k + 1) * u, gy + (r + 1) * u,
                                             fill=c, outline="")
-        cv.create_text(x1, 90 * s, text="%d%%" % round(pct), anchor="e",
+        cv.create_text(x1, 90 * s, text="—" if nolog() else "%d%%" % round(pct), anchor="e",
                        fill=col if pct >= 80 else MUTED, font=f_pct)
 
     def tick():
@@ -378,6 +645,18 @@ def run_gui(args):
         d = state["data"]
         if d is None:
             return "읽는 중…"
+        if nolog():
+            return "\n".join([
+                "기록을 못 찾았어요.",
+                "",
+                "Claude Code(터미널) 또는 데스크톱 앱 Code 탭 기록이",
+                "이 PC의 사용자 폴더\\.claude\\projects 에 있어야 해요.",
+                "웹 claude.ai만 쓰면 기록이 없어요.",
+                "WSL이나 다른 폴더라면 settings.json의 log_dirs에",
+                "경로를 넣어 주세요.",
+                "그래도 안 되면 오른쪽 클릭 > 진단 정보 저장.",
+                "",
+                "마지막 갱신 " + datetime.fromtimestamp(d["now"]).strftime("%Y-%m-%d %H:%M:%S")])
         L = ["[최근 5시간] " + fmt(d["tokens_5h"]) + " 토큰"]
         for m, v in d["by_model_5h"].items():
             L.append("   %s  %s" % (short_model(m), fmt(v)))
@@ -474,6 +753,16 @@ def run_gui(args):
         save_settings()
         draw()
 
+    def diag_save():
+        hide_tip()
+
+        def job():
+            try:
+                save_diagnose(True)
+            except Exception:
+                pass
+        threading.Thread(target=job, daemon=True).start()
+
     def quit_():
         hide_tip()
         root.destroy()
@@ -483,6 +772,7 @@ def run_gui(args):
     menu.add_command(label="지금 새로고침", command=refresh_evt.set)
     menu.add_command(label="이름 바꾸기", command=rename)
     menu.add_command(label="위치 초기화", command=reset_pos)
+    menu.add_command(label="진단 정보 저장", command=diag_save)
     menu.add_separator()
     menu.add_command(label="종료", command=quit_)
     cv.bind("<Button-3>", lambda e: (hide_tip(), menu.tk_popup(e.x_root, e.y_root)))
@@ -492,7 +782,8 @@ def run_gui(args):
     def worker():
         while not stop["v"]:
             try:
-                res = ("ok", compute(scan()))
+                info = {}
+                res = ("ok", compute(scan(None, info), None, info))
             except Exception as ex:
                 res = ("err", str(ex))
             q.put(res)
@@ -631,15 +922,24 @@ def main():
     ap.add_argument("--pos")
     ap.add_argument("--name", help="이번 실행에서만 쓸 햄스터 이름 (저장하지 않음)")
     ap.add_argument("--selftest", help="툴팁·끌기·메뉴 자동 시험 결과를 적을 파일 경로")
+    ap.add_argument("--diagnose", action="store_true", help="진단 정보를 화면에 출력")
     ap.add_argument("--demo", help="사진용 예시 상태. 평소 최대 대비 %%[,eat] (예: 92 또는 46,eat)")
     args = ap.parse_args()
+    if args.diagnose:
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+        print(diagnose_text())
+        return
     if args.once:
         try:
             sys.stdout.reconfigure(encoding="utf-8")
         except Exception:
             pass
         t = time.time()
-        r = compute(scan(args.now), args.now)
+        info = {}
+        r = compute(scan(args.now, info), args.now, info)
         r["elapsed_sec"] = round(time.time() - t, 2)
         r["text"] = {"5h": fmt(r["tokens_5h"]), "7d": fmt(r["tokens_7d"]), "max5h": fmt(r["max_5h_in_7d"])}
         print(json.dumps(r, ensure_ascii=False, indent=2))

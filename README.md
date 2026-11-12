@@ -27,7 +27,7 @@ This is not Anthropic's official usage limit. The widget cannot see your plan li
 
 ## Install
 
-Download `TokenHamster_v1.0.zip` from the Releases page, unzip it, and run `TokenHamster.exe`. There is no installer.
+Download `TokenHamster_v1.0.1.zip` from the Releases page, unzip it, and run `TokenHamster.exe`. There is no installer.
 
 Windows shows a "Windows protected your PC" screen because the file is not code-signed. Click **More info**, then **Run anyway**. If you would rather not run an unsigned exe, run it from source instead.
 
@@ -46,14 +46,32 @@ python widget.py
 
 - Drag the widget to move it. The position is remembered.
 - Hover to see token counts per model.
-- Right-click for refresh, rename, reset position, and quit.
+- Right-click for refresh, rename, reset position, save diagnostics, and quit.
 - Rename gives your hamster its own name, up to 8 characters.
 
 ## What it reads and stores
 
-- It reads the Claude Code session logs on your PC, under `%USERPROFILE%\.claude\projects`. From each response it takes the token counts, the timestamp, and the model name.
+- It reads the Claude Code session logs on your PC, under `%USERPROFILE%\.claude\projects`. If `CLAUDE_CONFIG_DIR` is set it also reads `projects` inside that folder, plus any folders you list under `log_dirs` in `settings.json`. From each response it takes the token counts, the timestamp, and the model name.
 - It stores a cache of those numbers and your settings in `%LOCALAPPDATA%\TokenHamster` (next to `widget.py` when run from source). The cache also keeps each log file's path and each response's ID so nothing is counted twice. It does not store conversation text.
 - It makes no network requests. There is no server and no account.
+
+## If it shows nothing
+
+If the widget says "기록을 못 찾았어요" (no logs found) and shows `—`, it found no log file changed in the last 8 days.
+
+- If you only use claude.ai in the browser, there are no local logs to read. Use Claude Code in a terminal or the Code tab of the desktop app.
+- If your logs live in WSL or another folder, list that folder under `log_dirs` in `%LOCALAPPDATA%\TokenHamster\settings.json` (next to `widget.py` when run from source). WSL is not scanned automatically because it can hang. Escape backslashes:
+
+  ```json
+  {
+    "log_dirs": [
+      "\\\\wsl.localhost\\Ubuntu\\home\\me\\.claude\\projects",
+      "D:\\claude-logs\\projects"
+    ]
+  }
+  ```
+
+- Otherwise right-click the widget and choose **진단 정보 저장** (save diagnostics). It writes `TokenHamster_진단.txt` to your Desktop. Send that file to the author. It has folder locations, file counts and log key names, but no conversation text, and your user name is masked as `%USERPROFILE%`. From source you can also run `python widget.py --diagnose`.
 
 ## Limits
 
